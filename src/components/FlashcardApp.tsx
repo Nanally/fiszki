@@ -2,6 +2,13 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
+import {
+  cacheCardOffline,
+  getOfflineStatusSnapshot,
+  getPlayableAudioUrl,
+  removeCardFromOffline,
+  subscribeOfflineStatus,
+} from '@/lib/offlineCache';
 import type { Flashcard, HskReference } from '@/lib/types';
 
 type Filter = 'all' | 'new' | 'mastered';
@@ -41,6 +48,8 @@ export function FlashcardApp() {
   const [searchingReference, setSearchingReference] = useState(false);
   const [formBusy, setFormBusy] = useState(false);
   const [formMessage, setFormMessage] = useState<string | null>(null);
+  const [offlineStatusMap, setOfflineStatusMap] = useState<Record<string, { audioStored: boolean }>>({});
+  const [offlineBusyMap, setOfflineBusyMap] = useState<Record<string, boolean>>({});
 
   const masteredCount = useMemo(() => cards.filter((card) => card.is_mastered).length, [cards]);
   const swipeStartX = useRef<number | null>(null);
@@ -121,6 +130,65 @@ export function FlashcardApp() {
     setGeneratedAudioUrl(null);
   }, [selectedReference?.id]);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadOfflineSnapshot = async () => {
+      try {
+        const snapshot = await getOfflineStatusSnapshot();
+        if (!cancelled) {
+          setOfflineStatusMap(snapshot);
+        }
+      } catch (error) {
+        console.error('Nie udało się odczytać pamięci offline', error);
+      }
+    };
+
+    void loadOfflineSnapshot();
+
+    const unsubscribe = subscribeOfflineStatus((detail) => {
+      setOfflineStatusMap((prev) => {
+        const next = { ...prev };
+        if (detail.cached) {
+          next[detail.cardId] = { audioStored: detail.audioStored };
+        } else {
+          delete next[detail.cardId];
+        }
+        return next;
+      });
+    });
+
+    return () => {
+      cancelled = true;
+      unsubscribe();
+    };
+  }, []);
+
+  useEffect(() => {
+    setOfflineBusyMap((prev) => {
+      const next = { ...prev };
+      const currentIds = new Set(cards.map((card) => card.id));
+      Object.keys(next).forEach((cardId) => {
+        if (!currentIds.has(cardId)) {
+          delete next[cardId];
+        }
+      });
+      return next;
+    });
+  }, [cards]);
+
+  const updateOfflineBusy = (cardId: string, value: boolean) => {
+    setOfflineBusyMap((prev) => {
+      const next = { ...prev };
+      if (value) {
+        next[cardId] = true;
+      } else {
+        delete next[cardId];
+      }
+      return next;
+    });
+  };
+
   const handleNextCard = () => {
     setShowTranslation(false);
     setActiveIndex((prev) => (prev + 1) % Math.max(cards.length, 1));
@@ -151,10 +219,42 @@ export function FlashcardApp() {
     }
   };
 
-  const handlePlayAudio = (card: Flashcard) => {
-    if (!card.audio_url || typeof Audio === 'undefined') return;
-    const audio = new Audio(card.audio_url);
-    void audio.play();
+  const handleToggleOffline = async (card: Flashcard) => {
+    const cardId = card.id;
+    updateOfflineBusy(cardId, true);
+
+    try {
+      if (offlineStatusMap[cardId]) {
+        await removeCardFromOffline(cardId);
+        setFormMessage('Fiszka została usunięta z pamięci offline.');
+      } else {
+        const result = await cacheCardOffline(card);
+        if (result.audioStored) {
+          setFormMessage('Fiszka oraz nagranie są dostępne offline.');
+        } else if (card.audio_url) {
+          setFormMessage('Fiszka dostępna offline. Nagrania nie udało się zapisać.');
+        } else {
+          setFormMessage('Fiszka dostępna offline.');
+        }
+      }
+    } catch (error) {
+      console.error('Nie udało się zaktualizować pamięci offline', error);
+      setFormMessage('Nie udało się zaktualizować pamięci offline.');
+    } finally {
+      updateOfflineBusy(cardId, false);
+    }
+  };
+
+  const handlePlayAudio = async (card: Flashcard) => {
+    if (typeof Audio === 'undefined') return;
+    try {
+      const audioUrl = await getPlayableAudioUrl(card.id, card.audio_url);
+      if (!audioUrl) return;
+      const audio = new Audio(audioUrl);
+      void audio.play();
+    } catch (error) {
+      console.error('Nie udało się odtworzyć audio', error);
+    }
   };
 
   const handleGenerateAudio = async () => {
@@ -220,11 +320,12 @@ export function FlashcardApp() {
   const toggleTranslation = () => {
     const currentCard = cards[activeIndex];
     if (!currentCard) return;
+    const hasAudio = Boolean(currentCard.audio_url) || Boolean(offlineStatusMap[currentCard.id]?.audioStored);
 
     setShowTranslation((prev) => {
       const next = !prev;
-      if (next && currentCard.audio_url) {
-        handlePlayAudio(currentCard);
+      if (next && hasAudio) {
+        void handlePlayAudio(currentCard);
       }
       return next;
     });
@@ -302,6 +403,8 @@ export function FlashcardApp() {
       setShowTranslation(false);
       return next;
     });
+
+    void removeCardFromOffline(card.id);
 
     setFormMessage('Fiszka została usunięta.');
   };
@@ -416,6 +519,12 @@ export function FlashcardApp() {
       );
     }
 
+    const activeCard = cards[activeIndex];
+    const offlineStatus = offlineStatusMap[activeCard.id];
+    const offlineAvailable = Boolean(offlineStatus);
+    const offlineBusy = Boolean(offlineBusyMap[activeCard.id]);
+    const canPlayAudio = Boolean(activeCard.audio_url) || Boolean(offlineStatus?.audioStored);
+
     return (
       <div className="flex flex-col items-center gap-6">
         <div className="relative w-full max-w-sm" style={{ perspective: '1600px' }}>
@@ -460,18 +569,38 @@ export function FlashcardApp() {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => void handleToggleMastered(cards[activeIndex])}
+                    onClick={() => void handleToggleMastered(activeCard)}
                     className={`rounded-full border px-3 py-1 text-xs transition backdrop-blur ${
-                      cards[activeIndex].is_mastered
+                      activeCard.is_mastered
                         ? 'border-emerald-200/70 bg-emerald-100/80 text-emerald-700'
                         : 'border-white/70 bg-white/40 text-neutral-600 hover:bg-white/70 hover:text-sky-700'
                     }`}
                   >
-                    {cards[activeIndex].is_mastered ? 'Opanowane' : 'Do nauki'}
+                    {activeCard.is_mastered ? 'Opanowane' : 'Do nauki'}
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleDeleteCard(cards[activeIndex])}
+                    onClick={() => void handleToggleOffline(activeCard)}
+                    disabled={offlineBusy}
+                    className={`rounded-full border px-3 py-1 text-xs transition backdrop-blur ${
+                      offlineAvailable
+                        ? 'border-emerald-200/70 bg-emerald-100/80 text-emerald-700'
+                        : 'border-white/70 bg-white/40 text-neutral-600 hover:bg-white/70 hover:text-sky-700'
+                    } ${offlineBusy ? 'opacity-60' : ''}`}
+                    aria-label={offlineAvailable ? 'Usuń fiszkę z pamięci offline' : 'Zapisz fiszkę offline'}
+                    title={
+                      offlineAvailable
+                        ? offlineStatus?.audioStored
+                          ? 'Fiszka (wraz z nagraniem) zapisana offline'
+                          : 'Fiszka zapisana offline (brak nagrania)'
+                        : 'Zapisz fiszkę offline'
+                    }
+                  >
+                    {offlineBusy ? '⌛' : offlineAvailable ? '📥' : '☁️'}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void handleDeleteCard(activeCard)}
                     className="rounded-full border border-white/70 bg-white/40 px-3 py-1 text-xs text-neutral-600 transition hover:bg-red-100/60 hover:text-red-600"
                     aria-label="Usuń fiszkę"
                     title="Usuń fiszkę"
@@ -482,15 +611,15 @@ export function FlashcardApp() {
               </div>
 
               <div className="flex grow flex-col items-center justify-center gap-5 text-center">
-                <p className="text-6xl font-semibold sm:text-7xl">{cards[activeIndex].hanzi}</p>
-                <p className="text-lg text-neutral-500">{cards[activeIndex].pinyin}</p>
+                <p className="text-6xl font-semibold sm:text-7xl">{activeCard.hanzi}</p>
+                <p className="text-lg text-neutral-500">{activeCard.pinyin}</p>
 
-                {cards[activeIndex].audio_url && (
+                {canPlayAudio && (
                   <button
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
-                      handlePlayAudio(cards[activeIndex]);
+                      void handlePlayAudio(activeCard);
                     }}
                     className="rounded-full border border-white/70 bg-white/40 px-4 py-1 text-sm text-neutral-700 shadow-sm transition hover:bg-sky-100/70 hover:text-sky-800"
                   >
@@ -499,9 +628,9 @@ export function FlashcardApp() {
                 )}
               </div>
 
-              {cards[activeIndex].comment && (
+              {activeCard.comment && (
                 <div className="mt-4 rounded-xl border border-white/60 bg-white/50 p-3 text-sm text-neutral-600 shadow-inner shadow-white/40">
-                  📝 {cards[activeIndex].comment}
+                  📝 {activeCard.comment}
                 </div>
               )}
             </div>
@@ -510,7 +639,7 @@ export function FlashcardApp() {
               className="absolute inset-0 flex items-center justify-center rounded-3xl border border-white/50 bg-gradient-to-br from-sky-500/80 via-indigo-500/80 to-fuchsia-500/70 p-6 text-center text-white shadow-2xl shadow-indigo-200/50 backdrop-blur"
               style={{ backfaceVisibility: 'hidden', transform: 'rotateY(180deg)' }}
             >
-              <p className="text-3xl font-semibold sm:text-4xl">{cards[activeIndex].polish}</p>
+              <p className="text-3xl font-semibold sm:text-4xl">{activeCard.polish}</p>
             </div>
           </div>
         </div>
