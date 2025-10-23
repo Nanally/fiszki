@@ -27,3 +27,20 @@ create table if not exists public.flashcards (
 
 create index if not exists flashcards_created_at_idx on public.flashcards (created_at desc);
 create index if not exists flashcards_is_mastered_idx on public.flashcards (is_mastered);
+
+create table if not exists public.collections (
+    id uuid primary key default gen_random_uuid(),
+    name text not null,
+    color text,
+    created_at timestamp with time zone default timezone('utc'::text, now())
+);
+
+create table if not exists public.flashcard_collections (
+    flashcard_id uuid references public.flashcards (id) on delete cascade,
+    collection_id uuid references public.collections (id) on delete cascade,
+    created_at timestamp with time zone default timezone('utc'::text, now()),
+    primary key (flashcard_id, collection_id)
+);
+
+create index if not exists flashcard_collections_collection_idx on public.flashcard_collections (collection_id);
+create index if not exists flashcard_collections_flashcard_idx on public.flashcard_collections (flashcard_id);

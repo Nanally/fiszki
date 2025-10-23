@@ -19,3 +19,16 @@ export type HskReference = {
   audio_url: string | null;
   level: string;
 };
+
+export type Collection = {
+  id: string;
+  name: string;
+  color: string | null;
+  created_at: string;
+};
+
+export type FlashcardCollectionLink = {
+  flashcard_id: string;
+  collection_id: string;
+  created_at: string;
+};

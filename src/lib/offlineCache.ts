@@ -1,5 +1,5 @@
 import { openDB, type DBSchema, type IDBPDatabase } from 'idb';
-import type { Flashcard } from './types';
+import type { Collection, Flashcard } from './types';
 
 type OfflineStatusDetail = {
   cardId: string;
@@ -16,6 +16,7 @@ interface FlashcardOfflineSchema extends DBSchema {
       card: Flashcard;
       cachedAt: number;
       audioStored: boolean;
+      collectionIds: string[];
     };
   };
   audio: {
@@ -27,12 +28,16 @@ interface FlashcardOfflineSchema extends DBSchema {
       type: string | undefined;
     };
   };
+  collections: {
+    key: string;
+    value: Collection;
+  };
 }
 
 type CacheResult = OfflineStatusDetail;
 
 const DB_NAME = 'flashcards-offline';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 
 let dbPromise: Promise<IDBPDatabase<FlashcardOfflineSchema>> | null = null;
 const listeners = new Set<OfflineStatusListener>();
@@ -53,6 +58,9 @@ async function getDb(): Promise<IDBPDatabase<FlashcardOfflineSchema>> {
         }
         if (!database.objectStoreNames.contains('audio')) {
           database.createObjectStore('audio');
+        }
+        if (!database.objectStoreNames.contains('collections')) {
+          database.createObjectStore('collections');
         }
       },
     });
@@ -107,13 +115,18 @@ export async function isCardCached(cardId: string): Promise<boolean> {
   return Boolean(record);
 }
 
-export async function cacheCardOffline(card: Flashcard): Promise<CacheResult> {
+type CacheCardOptions = {
+  collectionIds?: string[];
+};
+
+export async function cacheCardOffline(card: Flashcard, options?: CacheCardOptions): Promise<CacheResult> {
   if (!isBrowser) {
     throw new Error('Caching offline is only available in the browser.');
   }
 
   const db = await getDb();
   const cachedAt = Date.now();
+  const collectionIds = options?.collectionIds ?? [];
 
   let audioStored = false;
   if (card.audio_url) {
@@ -147,6 +160,7 @@ export async function cacheCardOffline(card: Flashcard): Promise<CacheResult> {
       card,
       cachedAt,
       audioStored,
+      collectionIds,
     },
     card.id
   );
@@ -190,6 +204,18 @@ export async function getAllOfflineCards(): Promise<Flashcard[]> {
   return records.map((item) => item.card);
 }
 
+export async function getOfflineCardCollections(): Promise<Record<string, string[]>> {
+  if (!isBrowser) {
+    return {};
+  }
+  const db = await getDb();
+  const records = await db.getAll('cards');
+  return records.reduce<Record<string, string[]>>((acc, item) => {
+    acc[item.card.id] = item.collectionIds ?? [];
+    return acc;
+  }, {});
+}
+
 export async function getPlayableAudioUrl(cardId: string, fallbackRemoteUrl?: string | null): Promise<string | null> {
   if (!isBrowser) {
     return fallbackRemoteUrl ?? null;
@@ -215,6 +241,44 @@ export async function clearOfflineCache(): Promise<void> {
     return;
   }
   const db = await getDb();
-  await Promise.all([db.clear('cards'), db.clear('audio')]);
+  await Promise.all([db.clear('cards'), db.clear('audio'), db.clear('collections')]);
   Array.from(audioObjectUrls.keys()).forEach((cardId) => revokeAudioObjectUrl(cardId));
+}
+
+export async function upsertCollectionsOffline(collections: Collection[]): Promise<void> {
+  if (!isBrowser) {
+    return;
+  }
+  const db = await getDb();
+  const tx = db.transaction('collections', 'readwrite');
+  await tx.store.clear();
+  await Promise.all(collections.map((collection) => tx.store.put(collection, collection.id)));
+  await tx.done;
+}
+
+export async function getOfflineCollections(): Promise<Collection[]> {
+  if (!isBrowser) {
+    return [];
+  }
+  const db = await getDb();
+  return db.getAll('collections');
+}
+
+export async function updateCachedCardCollections(cardId: string, collectionIds: string[]): Promise<void> {
+  if (!isBrowser) {
+    return;
+  }
+  const db = await getDb();
+  const record = await db.get('cards', cardId);
+  if (!record) {
+    return;
+  }
+  await db.put(
+    'cards',
+    {
+      ...record,
+      collectionIds,
+    },
+    cardId
+  );
 }

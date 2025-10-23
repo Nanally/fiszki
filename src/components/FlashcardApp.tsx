@@ -1,16 +1,20 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   cacheCardOffline,
   getAllOfflineCards,
+  getOfflineCardCollections,
+  getOfflineCollections,
   getOfflineStatusSnapshot,
   getPlayableAudioUrl,
   removeCardFromOffline,
   subscribeOfflineStatus,
+  updateCachedCardCollections,
+  upsertCollectionsOffline,
 } from '@/lib/offlineCache';
-import type { Flashcard, HskReference } from '@/lib/types';
+import type { Collection, Flashcard, HskReference } from '@/lib/types';
 
 type Filter = 'all' | 'new' | 'mastered';
 
@@ -32,13 +36,55 @@ const offlineEmptyStateCopy = {
   mastered: 'Brak zapisanych offline fiszek oznaczonych jako opanowane.',
 };
 
+const FALLBACK_MESSAGE = 'Tryb offline: wyświetlam zapisane fiszki.';
+const FALLBACK_EMPTY_MESSAGE = 'Brak zapisanych offline fiszek. Zapisz je, gdy masz połączenie.';
+
+const sortByCreatedAt = <T extends { created_at: string }>(items: T[]) =>
+  [...items].sort(
+    (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+  );
+
+const hexToRgba = (hex: string, alpha: number) => {
+  const cleaned = hex.replace('#', '');
+  const normalized =
+    cleaned.length === 3 ? cleaned.split('').map((char) => `${char}${char}`).join('') : cleaned;
+  if (normalized.length !== 6) {
+    return null;
+  }
+  const value = Number.parseInt(normalized, 16);
+  if (Number.isNaN(value)) {
+    return null;
+  }
+  const r = (value >> 16) & 255;
+  const g = (value >> 8) & 255;
+  const b = value & 255;
+  return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+};
+
+const gradientFromHex = (hex?: string | null) => {
+  if (!hex) {
+    return null;
+  }
+  const start = hexToRgba(hex, 0.85);
+  const end = hexToRgba(hex, 0.55);
+  if (!start || !end) {
+    return null;
+  }
+  return `linear-gradient(135deg, ${start}, ${end})`;
+};
+
 export function FlashcardApp() {
-  const [cards, setCards] = useState<Flashcard[]>([]);
+  const [allCards, setAllCards] = useState<Flashcard[]>([]);
+  const [cardCollectionsMap, setCardCollectionsMap] = useState<Record<string, string[]>>({});
   const [filter, setFilter] = useState<Filter>('all');
+  const [activeCollectionId, setActiveCollectionId] = useState<string | null>(null);
   const [activeIndex, setActiveIndex] = useState(0);
   const [showTranslation, setShowTranslation] = useState(false);
   const [loadingCards, setLoadingCards] = useState(true);
   const [error, setError] = useState<string | null>(null);
+
+  const [collections, setCollections] = useState<Collection[]>([]);
+  const [isCollectionsPanelOpen, setCollectionsPanelOpen] = useState(false);
 
   const [polishInput, setPolishInput] = useState('');
   const [commentInput, setCommentInput] = useState('');
@@ -60,7 +106,53 @@ export function FlashcardApp() {
   const [offlineBusyMap, setOfflineBusyMap] = useState<Record<string, boolean>>({});
   const [offlineFallbackActive, setOfflineFallbackActive] = useState(false);
 
+  const [collectionActionBusyMap, setCollectionActionBusyMap] = useState<Record<string, boolean>>({});
+  const [collectionFormBusy, setCollectionFormBusy] = useState(false);
+  const [collectionFormError, setCollectionFormError] = useState<string | null>(null);
+  const [newCollectionName, setNewCollectionName] = useState('');
+  const [newCollectionColor, setNewCollectionColor] = useState('#0ea5e9');
+  const [editingCollectionId, setEditingCollectionId] = useState<string | null>(null);
+  const [editingCollectionName, setEditingCollectionName] = useState('');
+
+  const cards = useMemo(() => {
+    let next = allCards;
+    if (filter === 'new') {
+      next = next.filter((item) => !item.is_mastered);
+    } else if (filter === 'mastered') {
+      next = next.filter((item) => item.is_mastered);
+    }
+    if (activeCollectionId) {
+      next = next.filter((item) => (cardCollectionsMap[item.id] ?? []).includes(activeCollectionId));
+    }
+    return next;
+  }, [allCards, cardCollectionsMap, filter, activeCollectionId]);
+
   const masteredCount = useMemo(() => cards.filter((card) => card.is_mastered).length, [cards]);
+
+  const collectionUsageCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    Object.values(cardCollectionsMap).forEach((collectionIds) => {
+      collectionIds.forEach((collectionId) => {
+        counts[collectionId] = (counts[collectionId] ?? 0) + 1;
+      });
+    });
+    return counts;
+  }, [cardCollectionsMap]);
+
+  const activeCollection = useMemo(
+    () =>
+      activeCollectionId ? collections.find((collection) => collection.id === activeCollectionId) ?? null : null,
+    [activeCollectionId, collections]
+  );
+
+  const activeCard = cards[activeIndex] ?? null;
+  const activeCardCollectionIds = activeCard ? cardCollectionsMap[activeCard.id] ?? [] : [];
+  const primaryCollectionColor =
+    (activeCollection && activeCardCollectionIds.includes(activeCollection.id) && activeCollection.color) ||
+    collections.find((collection) => activeCardCollectionIds.includes(collection.id))?.color ||
+    null;
+  const cardBackGradient = gradientFromHex(primaryCollectionColor);
+
   const swipeStartX = useRef<number | null>(null);
   const swipeDetected = useRef(false);
 
@@ -70,38 +162,32 @@ export function FlashcardApp() {
   };
 
   useEffect(() => {
+    if (!cards.length) {
+      setActiveIndex(0);
+      setShowTranslation(false);
+      return;
+    }
+    setActiveIndex((previous) => Math.min(previous, cards.length - 1));
+  }, [cards.length]);
+
+  useEffect(() => {
+    setShowTranslation(false);
+  }, [filter, activeCollectionId]);
+
+  useEffect(() => {
     let cancelled = false;
 
-    const applyFilter = (items: Flashcard[]) => {
-      let next = items;
-      if (filter === 'new') {
-        next = items.filter((item) => !item.is_mastered);
-      } else if (filter === 'mastered') {
-        next = items.filter((item) => item.is_mastered);
-      }
-      return [...next].sort(
-        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
-      );
-    };
-
-    const useOfflineFallback = async (message: string, emptyMessage: string) => {
+    const loadFromOffline = async () => {
       try {
-        const offlineCards = applyFilter(await getAllOfflineCards());
+        const offlineCards = await getAllOfflineCards();
+        const offlineMembership = await getOfflineCardCollections();
         if (cancelled) return;
 
-        if (offlineCards.length) {
-          setCards(offlineCards);
-          setActiveIndex(0);
-          setShowTranslation(false);
-          setStatusMessage(message);
-          setOfflineFallbackActive(true);
-          setError(null);
-        } else {
-          setCards([]);
-          setOfflineFallbackActive(true);
-          setStatusMessage(emptyMessage);
-          setError(null);
-        }
+        setAllCards(sortByCreatedAt(offlineCards));
+        setCardCollectionsMap(offlineMembership);
+        setStatusMessage(offlineCards.length ? FALLBACK_MESSAGE : FALLBACK_EMPTY_MESSAGE);
+        setOfflineFallbackActive(offlineCards.length > 0);
+        setError(null);
       } catch (fallbackError) {
         console.error('Nie udało się wczytać danych offline', fallbackError);
         if (!cancelled) {
@@ -121,45 +207,39 @@ export function FlashcardApp() {
       setOfflineFallbackActive(false);
 
       if (!supabase) {
-        await useOfflineFallback(
-          'Tryb offline: wyświetlam zapisane fiszki.',
-          'Brak zapisanych offline fiszek. Zapisz je, gdy masz połączenie.'
-        );
+        await loadFromOffline();
         return;
       }
 
-      let query = supabase.from('flashcards').select().order('created_at', { ascending: true });
-
-      if (filter === 'new') {
-        query = query.eq('is_mastered', false);
-      } else if (filter === 'mastered') {
-        query = query.eq('is_mastered', true);
-      }
-
       try {
-        const { data, error: loadError } = await query;
-        if (cancelled) return;
+        const { data, error: loadError } = await supabase
+          .from('flashcards')
+          .select('*, flashcard_collections(collection_id)')
+          .order('created_at', { ascending: true });
 
         if (loadError) {
           console.warn('Nie udało się pobrać fiszek z Supabase', loadError);
-          await useOfflineFallback(
-            'Tryb offline: wyświetlam zapisane fiszki.',
-            'Brak zapisanych offline fiszek. Zapisz je, gdy masz połączenie.'
-          );
+          await loadFromOffline();
           return;
         }
 
-        const remoteCards = applyFilter(data ?? []);
-        setCards(remoteCards);
-        setActiveIndex(0);
-        setShowTranslation(false);
+        const rows = (data ?? []) as (Flashcard & { flashcard_collections?: { collection_id: string }[] })[];
+        const membership: Record<string, string[]> = {};
+        const cardsOnly = rows.map((row) => {
+          const collectionIds = row.flashcard_collections?.map((item) => item.collection_id) ?? [];
+          membership[row.id] = collectionIds;
+          const { flashcard_collections, ...card } = row;
+          return card;
+        });
+
+        if (cancelled) return;
+
+        setAllCards(sortByCreatedAt(cardsOnly));
+        setCardCollectionsMap(membership);
         setLoadingCards(false);
       } catch (requestError) {
         console.error('Błąd podczas pobierania fiszek', requestError);
-        await useOfflineFallback(
-          'Tryb offline: wyświetlam zapisane fiszki.',
-          'Brak zapisanych offline fiszek. Zapisz je, gdy masz połączenie.'
-        );
+        await loadFromOffline();
       }
     };
 
@@ -168,7 +248,50 @@ export function FlashcardApp() {
     return () => {
       cancelled = true;
     };
-  }, [filter]);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadCollections = async () => {
+      if (!supabase) {
+        const offlineCollections = sortByCreatedAt(await getOfflineCollections());
+        if (!cancelled) {
+          setCollections(offlineCollections);
+        }
+        return;
+      }
+
+      try {
+        const { data, error } = await supabase
+          .from('collections')
+          .select()
+          .order('created_at', { ascending: true });
+
+        if (error) {
+          throw error;
+        }
+
+        const list = sortByCreatedAt((data ?? []) as Collection[]);
+        if (!cancelled) {
+          setCollections(list);
+          void upsertCollectionsOffline(list);
+        }
+      } catch (collectionError) {
+        console.error('Nie udało się pobrać zbiorów', collectionError);
+        const offlineCollections = sortByCreatedAt(await getOfflineCollections());
+        if (!cancelled) {
+          setCollections(offlineCollections);
+        }
+      }
+    };
+
+    void loadCollections();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (!supabase) return;
@@ -244,7 +367,7 @@ export function FlashcardApp() {
   useEffect(() => {
     setOfflineBusyMap((prev) => {
       const next = { ...prev };
-      const currentIds = new Set(cards.map((card) => card.id));
+      const currentIds = new Set(allCards.map((card) => card.id));
       Object.keys(next).forEach((cardId) => {
         if (!currentIds.has(cardId)) {
           delete next[cardId];
@@ -252,7 +375,7 @@ export function FlashcardApp() {
       });
       return next;
     });
-  }, [cards]);
+  }, [allCards]);
 
   const updateOfflineBusy = (cardId: string, value: boolean) => {
     setOfflineBusyMap((prev) => {
@@ -264,6 +387,252 @@ export function FlashcardApp() {
       }
       return next;
     });
+  };
+
+  const updateCollectionBusy = (collectionId: string, value: boolean) => {
+    setCollectionActionBusyMap((prev) => {
+      const next = { ...prev };
+      if (value) {
+        next[collectionId] = true;
+      } else {
+        delete next[collectionId];
+      }
+      return next;
+    });
+  };
+
+  const handleCreateCollection = async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!supabase) {
+      setCollectionFormError('Brak połączenia z Supabase. Spróbuj ponownie, gdy będziesz online.');
+      return;
+    }
+
+    const trimmedName = newCollectionName.trim();
+    if (!trimmedName) {
+      setCollectionFormError('Podaj nazwę zbioru.');
+      return;
+    }
+
+    setCollectionFormBusy(true);
+    setCollectionFormError(null);
+
+    try {
+      const payload = { name: trimmedName, color: newCollectionColor };
+      const { data, error } = await supabase
+        .from('collections')
+        .insert(payload)
+        .select()
+        .single();
+
+      if (error) {
+        throw error;
+      }
+
+      const created = data as Collection;
+      setCollections((prev) => {
+        const next = sortByCreatedAt([...prev, created]);
+        void upsertCollectionsOffline(next);
+        return next;
+      });
+      setNewCollectionName('');
+    } catch (createError) {
+      console.error('Nie udało się utworzyć zbioru', createError);
+      setCollectionFormError('Nie udało się utworzyć zbioru.');
+    } finally {
+      setCollectionFormBusy(false);
+    }
+  };
+
+  const handleRenameCollection = async (
+    event: React.FormEvent<HTMLFormElement>,
+    collectionId: string
+  ) => {
+    event.preventDefault();
+    if (!supabase) {
+      setCollectionFormError('Brak połączenia z Supabase. Spróbuj ponownie, gdy będziesz online.');
+      return;
+    }
+
+    const trimmedName = editingCollectionName.trim();
+    if (!trimmedName) {
+      setCollectionFormError('Podaj nazwę zbioru.');
+      return;
+    }
+
+    updateCollectionBusy(collectionId, true);
+    setCollectionFormError(null);
+
+    try {
+      const { error } = await supabase
+        .from('collections')
+        .update({ name: trimmedName })
+        .eq('id', collectionId);
+
+      if (error) {
+        throw error;
+      }
+
+      setCollections((prev) => {
+        const updated = prev.map((collection) =>
+          collection.id === collectionId ? { ...collection, name: trimmedName } : collection
+        );
+        const sorted = sortByCreatedAt(updated);
+        void upsertCollectionsOffline(sorted);
+        return sorted;
+      });
+      setEditingCollectionId(null);
+      setEditingCollectionName('');
+    } catch (renameError) {
+      console.error('Nie udało się zmienić nazwy zbioru', renameError);
+      setCollectionFormError('Nie udało się zmienić nazwy zbioru.');
+    } finally {
+      updateCollectionBusy(collectionId, false);
+    }
+  };
+
+  const handleCollectionColorChange = async (collectionId: string, color: string) => {
+    if (!supabase) {
+      setCollectionFormError('Brak połączenia z Supabase. Spróbuj ponownie, gdy będziesz online.');
+      return;
+    }
+
+    updateCollectionBusy(collectionId, true);
+    setCollectionFormError(null);
+
+    try {
+      const { error } = await supabase
+        .from('collections')
+        .update({ color })
+        .eq('id', collectionId);
+
+      if (error) {
+        throw error;
+      }
+
+      setCollections((prev) => {
+        const next = prev.map((collection) =>
+          collection.id === collectionId ? { ...collection, color } : collection
+        );
+        void upsertCollectionsOffline(next);
+        return next;
+      });
+    } catch (colorError) {
+      console.error('Nie udało się zaktualizować koloru zbioru', colorError);
+      setCollectionFormError('Nie udało się zaktualizować koloru zbioru.');
+    } finally {
+      updateCollectionBusy(collectionId, false);
+    }
+  };
+
+  const handleDeleteCollection = async (collectionId: string) => {
+    if (!supabase) {
+      setCollectionFormError('Brak połączenia z Supabase. Spróbuj ponownie, gdy będziesz online.');
+      return;
+    }
+
+    if (typeof window !== 'undefined') {
+      const confirmed = window.confirm('Usunąć wybrany zbiór?');
+      if (!confirmed) {
+        return;
+      }
+    }
+
+    updateCollectionBusy(collectionId, true);
+    setCollectionFormError(null);
+
+    try {
+      const { error } = await supabase.from('collections').delete().eq('id', collectionId);
+      if (error) {
+        throw error;
+      }
+
+      setCollections((prev) => {
+        const next = prev.filter((collection) => collection.id !== collectionId);
+        void upsertCollectionsOffline(next);
+        return next;
+      });
+
+      if (activeCollectionId === collectionId) {
+        setActiveCollectionId(null);
+      }
+
+      const changed: Array<[string, string[]]> = [];
+      setCardCollectionsMap((prev) => {
+        const next: Record<string, string[]> = {};
+        Object.entries(prev).forEach(([cardId, collectionIds]) => {
+          const filtered = collectionIds.filter((id) => id !== collectionId);
+          if (filtered.length !== collectionIds.length) {
+            changed.push([cardId, filtered]);
+          }
+          next[cardId] = filtered;
+        });
+        return next;
+      });
+
+      changed.forEach(([cardId, collectionIds]) => {
+        void updateCachedCardCollections(cardId, collectionIds);
+      });
+    } catch (deleteError) {
+      console.error('Nie udało się usunąć zbioru', deleteError);
+      setCollectionFormError('Nie udało się usunąć zbioru.');
+    } finally {
+      updateCollectionBusy(collectionId, false);
+    }
+  };
+
+  const handleToggleCardCollectionMembership = async (collectionId: string) => {
+    const card = cards[activeIndex];
+    if (!card) {
+      return;
+    }
+
+    if (!supabase) {
+      setFormMessage('Zarządzanie zbiorami wymaga połączenia z Supabase.');
+      return;
+    }
+
+    const cardId = card.id;
+    const currentCollections = cardCollectionsMap[cardId] ?? [];
+    const willAssign = !currentCollections.includes(collectionId);
+
+    updateCollectionBusy(collectionId, true);
+    setFormMessage(null);
+
+    try {
+      if (willAssign) {
+        const { error } = await supabase
+          .from('flashcard_collections')
+          .insert({ collection_id: collectionId, flashcard_id: cardId });
+        if (error) {
+          throw error;
+        }
+      } else {
+        const { error } = await supabase
+          .from('flashcard_collections')
+          .delete()
+          .eq('collection_id', collectionId)
+          .eq('flashcard_id', cardId);
+        if (error) {
+          throw error;
+        }
+      }
+
+      const updatedCollections = willAssign
+        ? [...currentCollections, collectionId]
+        : currentCollections.filter((id) => id !== collectionId);
+
+      setCardCollectionsMap((prev) => ({
+        ...prev,
+        [cardId]: updatedCollections,
+      }));
+      void updateCachedCardCollections(cardId, updatedCollections);
+    } catch (membershipError) {
+      console.error('Nie udało się zaktualizować przypisania do zbioru', membershipError);
+      setFormMessage('Nie udało się zaktualizować przypisania do zbioru.');
+    } finally {
+      updateCollectionBusy(collectionId, false);
+    }
   };
 
   const handleNextCard = () => {
@@ -279,7 +648,7 @@ export function FlashcardApp() {
   const handleToggleMastered = async (card: Flashcard) => {
     if (!supabase) return;
     const nextValue = !card.is_mastered;
-    setCards((current) =>
+    setAllCards((current) =>
       current.map((item) => (item.id === card.id ? { ...item, is_mastered: nextValue } : item))
     );
 
@@ -290,7 +659,7 @@ export function FlashcardApp() {
 
     if (updateError) {
       setFormMessage(`Nie udało się zaktualizować fiszki: ${updateError.message}`);
-      setCards((current) =>
+      setAllCards((current) =>
         current.map((item) => (item.id === card.id ? { ...item, is_mastered: card.is_mastered } : item))
       );
     }
@@ -305,7 +674,8 @@ export function FlashcardApp() {
         await removeCardFromOffline(cardId);
         setFormMessage('Fiszka została usunięta z pamięci offline.');
       } else {
-        const result = await cacheCardOffline(card);
+        const collectionIds = cardCollectionsMap[cardId] ?? [];
+        const result = await cacheCardOffline(card, { collectionIds });
         if (result.audioStored) {
           setFormMessage('Fiszka oraz nagranie są dostępne offline.');
         } else if (card.audio_url) {
@@ -473,13 +843,13 @@ export function FlashcardApp() {
       return;
     }
 
-    setCards((current) => {
-      const next = current.filter((item) => item.id !== card.id);
-      const nextIndex = next.length ? Math.min(activeIndex, next.length - 1) : 0;
-      setActiveIndex(nextIndex);
-      setShowTranslation(false);
+    setAllCards((current) => current.filter((item) => item.id !== card.id));
+    setCardCollectionsMap((current) => {
+      const next = { ...current };
+      delete next[card.id];
       return next;
     });
+    setShowTranslation(false);
 
     void removeCardFromOffline(card.id);
 
@@ -567,7 +937,8 @@ export function FlashcardApp() {
     if (insertError) {
       setFormMessage(`Nie udało się zapisać fiszki: ${insertError.message}`);
     } else if (data) {
-      setCards((current) => [...current, data]);
+      setAllCards((current) => sortByCreatedAt([...current, data]));
+      setCardCollectionsMap((current) => ({ ...current, [data.id]: [] }));
       setFormMessage('Dodano słówko do fiszek.');
       resetForm();
     }
@@ -597,11 +968,33 @@ export function FlashcardApp() {
       );
     }
 
-    const activeCard = cards[activeIndex];
-    const offlineStatus = offlineStatusMap[activeCard.id];
+    const currentCard = activeCard;
+    if (!currentCard) {
+      return null;
+    }
+
+    const offlineStatus = offlineStatusMap[currentCard.id];
     const offlineAvailable = Boolean(offlineStatus);
-    const offlineBusy = Boolean(offlineBusyMap[activeCard.id]);
-    const canPlayAudio = Boolean(activeCard.audio_url) || Boolean(offlineStatus?.audioStored);
+    const offlineBusy = Boolean(offlineBusyMap[currentCard.id]);
+    const canPlayAudio = Boolean(currentCard.audio_url) || Boolean(offlineStatus?.audioStored);
+    const fallbackGradient = 'bg-gradient-to-br from-sky-500/80 via-indigo-500/80 to-fuchsia-500/70';
+    const frontCardStyle: CSSProperties = {
+      backfaceVisibility: 'hidden',
+      borderColor: primaryCollectionColor ? `${primaryCollectionColor}55` : undefined,
+    };
+    const backCardClassName = `absolute inset-0 flex items-center justify-center rounded-3xl border border-white/50 ${
+      cardBackGradient ? '' : fallbackGradient
+    } p-6 text-center text-white shadow-2xl shadow-indigo-200/50 backdrop-blur`;
+    const backCardStyle: CSSProperties = cardBackGradient
+      ? {
+          backfaceVisibility: 'hidden',
+          transform: 'rotateY(180deg)',
+          backgroundImage: cardBackGradient,
+        }
+      : {
+          backfaceVisibility: 'hidden',
+          transform: 'rotateY(180deg)',
+        };
 
     return (
       <div className="flex flex-col items-center gap-6">
@@ -643,7 +1036,7 @@ export function FlashcardApp() {
           >
             <div
               className="absolute inset-0 flex flex-col rounded-3xl border border-white/50 bg-white/70 p-6 shadow-2xl shadow-indigo-100/50 backdrop-blur"
-              style={{ backfaceVisibility: 'hidden' }}
+              style={frontCardStyle}
             >
               <div className="mb-6 flex items-center justify-between text-sm text-neutral-500">
                 <span>
@@ -652,18 +1045,18 @@ export function FlashcardApp() {
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
-                    onClick={() => void handleToggleMastered(activeCard)}
+                    onClick={() => void handleToggleMastered(currentCard)}
                     className={`rounded-full border px-3 py-1 text-xs transition backdrop-blur ${
-                      activeCard.is_mastered
+                      currentCard.is_mastered
                         ? 'border-emerald-200/70 bg-emerald-100/80 text-emerald-700'
                         : 'border-white/70 bg-white/40 text-neutral-600 hover:bg-white/70 hover:text-sky-700'
                     }`}
                   >
-                    {activeCard.is_mastered ? 'Opanowane' : 'Do nauki'}
+                    {currentCard.is_mastered ? 'Opanowane' : 'Do nauki'}
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleToggleOffline(activeCard)}
+                    onClick={() => void handleToggleOffline(currentCard)}
                     disabled={offlineBusy}
                     className={`rounded-full border px-3 py-1 text-xs transition backdrop-blur ${
                       offlineAvailable
@@ -674,8 +1067,8 @@ export function FlashcardApp() {
                     title={
                       offlineAvailable
                         ? offlineStatus?.audioStored
-                          ? 'Fiszka (wraz z nagraniem) zapisana offline'
-                          : 'Fiszka zapisana offline (brak nagrania)'
+                        ? 'Fiszka (wraz z nagraniem) zapisana offline'
+                        : 'Fiszka zapisana offline (brak nagrania)'
                         : 'Zapisz fiszkę offline'
                     }
                   >
@@ -683,7 +1076,7 @@ export function FlashcardApp() {
                   </button>
                   <button
                     type="button"
-                    onClick={() => void handleDeleteCard(activeCard)}
+                    onClick={() => void handleDeleteCard(currentCard)}
                     className="rounded-full border border-white/70 bg-white/40 px-3 py-1 text-xs text-neutral-600 transition hover:bg-red-100/60 hover:text-red-600"
                     aria-label="Usuń fiszkę"
                     title="Usuń fiszkę"
@@ -694,15 +1087,15 @@ export function FlashcardApp() {
               </div>
 
               <div className="flex grow flex-col items-center justify-center gap-5 text-center">
-                <p className="text-6xl font-semibold sm:text-7xl">{activeCard.hanzi}</p>
-                <p className="text-lg text-neutral-500">{activeCard.pinyin}</p>
+                <p className="text-6xl font-semibold sm:text-7xl">{currentCard.hanzi}</p>
+                <p className="text-lg text-neutral-500">{currentCard.pinyin}</p>
 
                 {canPlayAudio && (
                   <button
                     type="button"
                     onClick={(event) => {
                       event.stopPropagation();
-                      void handlePlayAudio(activeCard);
+                      void handlePlayAudio(currentCard);
                     }}
                     className="rounded-full border border-white/70 bg-white/40 px-4 py-1 text-sm text-neutral-700 shadow-sm transition hover:bg-sky-100/70 hover:text-sky-800"
                   >
@@ -711,18 +1104,15 @@ export function FlashcardApp() {
                 )}
               </div>
 
-              {activeCard.comment && (
+              {currentCard.comment && (
                 <div className="mt-4 rounded-xl border border-white/60 bg-white/50 p-3 text-sm text-neutral-600 shadow-inner shadow-white/40">
-                  📝 {activeCard.comment}
+                  📝 {currentCard.comment}
                 </div>
               )}
             </div>
 
-            <div
-              className="absolute inset-0 flex items-center justify-center rounded-3xl border border-white/50 bg-gradient-to-br from-sky-500/80 via-indigo-500/80 to-fuchsia-500/70 p-6 text-center text-white shadow-2xl shadow-indigo-200/50 backdrop-blur"
-              style={{ backfaceVisibility: 'hidden', transform: 'rotateY(180deg)' }}
-            >
-              <p className="text-3xl font-semibold sm:text-4xl">{activeCard.polish}</p>
+            <div className={backCardClassName} style={backCardStyle}>
+              <p className="text-3xl font-semibold sm:text-4xl">{currentCard.polish}</p>
             </div>
           </div>
         </div>
@@ -759,7 +1149,8 @@ export function FlashcardApp() {
   }
 
   return (
-    <div className="mx-auto flex w-full max-w-5xl flex-col gap-10 rounded-3xl border border-white/40 bg-white/60 p-6 pb-16 shadow-2xl shadow-indigo-100/40 backdrop-blur-xl sm:p-10">
+    <>
+      <div className="mx-auto flex w-full max-w-5xl flex-col gap-10 rounded-3xl border border-white/40 bg-white/60 p-6 pb-16 shadow-2xl shadow-indigo-100/40 backdrop-blur-xl sm:p-10">
       <header className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
         <div className="flex flex-wrap items-center gap-2">
           {(Object.keys(FILTER_LABELS) as Filter[]).map((option) => (
@@ -783,11 +1174,30 @@ export function FlashcardApp() {
             Dodaj
           </a>
         </div>
-        <div className="rounded-2xl border border-white/50 bg-white/70 px-5 py-4 text-sm text-neutral-600 shadow-lg shadow-sky-100/40 backdrop-blur">
-          <p className="text-xs uppercase tracking-wide text-sky-600">Postęp</p>
-          <p>
-            {masteredCount}/{cards.length} opanowanych
-          </p>
+        <div className="flex items-center gap-3">
+          <button
+            type="button"
+            onClick={() => {
+              setCollectionsPanelOpen(true);
+              setCollectionFormError(null);
+            }}
+            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/70 bg-white/40 text-lg text-neutral-600 shadow-sm transition hover:bg-white/70 hover:text-sky-700"
+            aria-label="Zarządzaj zbiorami"
+            title="Zarządzaj zbiorami"
+          >
+            ☰
+          </button>
+          <div className="rounded-2xl border border-white/50 bg-white/70 px-5 py-4 text-sm text-neutral-600 shadow-lg shadow-sky-100/40 backdrop-blur">
+            <p className="text-xs uppercase tracking-wide text-sky-600">Postęp</p>
+            <p>
+              {masteredCount}/{cards.length}
+            </p>
+            {activeCollection && (
+              <p className="mt-1 text-xs text-neutral-500">
+                Zbiór: <span className="font-medium text-neutral-700">{activeCollection.name}</span>
+              </p>
+            )}
+          </div>
         </div>
       </header>
 
@@ -990,5 +1400,220 @@ export function FlashcardApp() {
         </form>
       </section>
     </div>
+
+      {isCollectionsPanelOpen && (
+        <div className="fixed inset-0 z-50 flex justify-end bg-black/30 backdrop-blur-sm">
+          <div className="flex h-full w-full max-w-sm flex-col gap-5 overflow-y-auto bg-white p-6 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h2 className="text-lg font-semibold text-neutral-800">Zbiory fiszek</h2>
+              <button
+                type="button"
+                onClick={() => {
+                  setCollectionsPanelOpen(false);
+                  setEditingCollectionId(null);
+                  setEditingCollectionName('');
+                  setCollectionFormError(null);
+                }}
+                className="rounded-full border border-neutral-200 bg-white px-3 py-1 text-sm text-neutral-600 shadow-sm transition hover:bg-neutral-100 hover:text-neutral-800"
+                aria-label="Zamknij panel zbiorów"
+              >
+                ✕
+              </button>
+            </div>
+
+            {collectionFormError && (
+              <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">
+                {collectionFormError}
+              </div>
+            )}
+
+            {activeCard ? (
+              <div className="rounded-2xl border border-sky-100 bg-sky-50/70 px-4 py-3 text-sm text-neutral-700 shadow-inner">
+                <p className="text-xs uppercase tracking-wide text-sky-600">Aktualna fiszka</p>
+                <p className="mt-1 font-medium text-neutral-800">
+                  {activeCard.hanzi} — {activeCard.polish}
+                </p>
+                <div className="mt-3 flex flex-col gap-2">
+                  {collections.length ? (
+                    collections.map((collection) => {
+                      const isMember = activeCardCollectionIds.includes(collection.id);
+                      const busy = Boolean(collectionActionBusyMap[collection.id]);
+                      return (
+                        <label
+                          key={collection.id}
+                          className="flex items-center justify-between gap-2 rounded-xl bg-white/80 px-3 py-2 text-sm shadow-sm"
+                        >
+                          <span className="flex items-center gap-3">
+                            <input
+                              type="checkbox"
+                              checked={isMember}
+                              onChange={() => void handleToggleCardCollectionMembership(collection.id)}
+                              disabled={busy}
+                            />
+                            <span className="flex items-center gap-2">
+                              <span
+                                className="h-3 w-3 rounded-full border border-neutral-200"
+                                style={{ backgroundColor: collection.color ?? '#0ea5e9' }}
+                              />
+                              {collection.name}
+                            </span>
+                          </span>
+                          {busy && <span className="text-xs text-neutral-400">…</span>}
+                        </label>
+                      );
+                    })
+                  ) : (
+                    <p className="text-xs text-neutral-500">Brak zbiorów. Utwórz pierwszy niżej.</p>
+                  )}
+                </div>
+              </div>
+            ) : (
+              <div className="rounded-xl border border-neutral-200 bg-neutral-50 px-4 py-3 text-xs text-neutral-500">
+                Brak aktywnej fiszki do przypisania.
+              </div>
+            )}
+
+            <div className="flex items-center justify-between gap-2">
+              <button
+                type="button"
+                onClick={() => setActiveCollectionId(null)}
+                className="rounded-full border border-neutral-200 bg-white px-4 py-2 text-xs text-neutral-600 transition hover:bg-neutral-100 hover:text-neutral-800"
+              >
+                Pokaż wszystkie
+              </button>
+              {activeCollection && (
+                <span className="text-xs text-neutral-500">
+                  Aktywny zbiór: <span className="font-medium text-neutral-700">{activeCollection.name}</span>
+                </span>
+              )}
+            </div>
+
+            <div className="flex flex-col gap-3">
+              {collections.length ? (
+                collections.map((collection) => {
+                  const isActive = activeCollectionId === collection.id;
+                  const busy = Boolean(collectionActionBusyMap[collection.id]);
+                  const usage = collectionUsageCounts[collection.id] ?? 0;
+
+                  return (
+                    <div
+                      key={collection.id}
+                      className={`rounded-2xl border px-4 py-3 shadow-sm transition ${
+                        isActive ? 'border-sky-300 bg-sky-50' : 'border-neutral-200 bg-white'
+                      }`}
+                    >
+                      {editingCollectionId === collection.id ? (
+                        <form
+                          className="flex items-center gap-2"
+                          onSubmit={(event) => void handleRenameCollection(event, collection.id)}
+                        >
+                          <input
+                            value={editingCollectionName}
+                            onChange={(event) => setEditingCollectionName(event.target.value)}
+                            className="flex-1 rounded-lg border border-neutral-300 px-3 py-1 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                            autoFocus
+                          />
+                          <button
+                            type="submit"
+                            disabled={busy}
+                            className="rounded-full border border-emerald-200 bg-emerald-100 px-2 py-1 text-xs text-emerald-700 transition hover:bg-emerald-200 disabled:opacity-60"
+                          >
+                            ✓
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingCollectionId(null);
+                              setEditingCollectionName('');
+                            }}
+                            className="rounded-full border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-600 transition hover:bg-neutral-100"
+                          >
+                            ✕
+                          </button>
+                        </form>
+                      ) : (
+                        <div className="flex items-center gap-2">
+                          <button
+                            type="button"
+                            onClick={() => setActiveCollectionId(collection.id)}
+                            className={`flex flex-1 items-center gap-2 text-left text-sm ${
+                              isActive ? 'text-sky-700' : 'text-neutral-700 hover:text-sky-700'
+                            }`}
+                          >
+                            <span
+                              className="h-3 w-3 rounded-full border border-neutral-200"
+                              style={{ backgroundColor: collection.color ?? '#0ea5e9' }}
+                            />
+                            {collection.name}
+                          </button>
+                          <span className="text-xs text-neutral-400">{usage}</span>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              setEditingCollectionId(collection.id);
+                              setEditingCollectionName(collection.name);
+                            }}
+                            className="rounded-full border border-neutral-200 bg-white px-2 py-1 text-xs text-neutral-600 transition hover:bg-neutral-100"
+                            aria-label="Zmień nazwę zbioru"
+                          >
+                            ✏️
+                          </button>
+                          <input
+                            type="color"
+                            value={collection.color ?? '#0ea5e9'}
+                            onChange={(event) => void handleCollectionColorChange(collection.id, event.target.value)}
+                            disabled={busy}
+                            className="h-8 w-8 cursor-pointer rounded border border-neutral-200 bg-white p-1"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteCollection(collection.id)}
+                            disabled={busy}
+                            className="rounded-full border border-red-200 bg-red-100 px-2 py-1 text-xs text-red-600 transition hover:bg-red-200 disabled:opacity-60"
+                            aria-label="Usuń zbiór"
+                          >
+                            🗑️
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })
+              ) : (
+                <p className="text-xs text-neutral-500">Brak zdefiniowanych zbiorów.</p>
+              )}
+            </div>
+
+            <form
+              onSubmit={(event) => void handleCreateCollection(event)}
+              className="mt-auto rounded-2xl border border-neutral-200 bg-neutral-50 px-4 py-3 shadow-inner"
+            >
+              <p className="text-sm font-medium text-neutral-700">Nowy zbiór</p>
+              <div className="mt-2 flex items-center gap-3">
+                <input
+                  value={newCollectionName}
+                  onChange={(event) => setNewCollectionName(event.target.value)}
+                  className="flex-1 rounded-lg border border-neutral-300 px-3 py-2 text-sm focus:border-sky-400 focus:outline-none focus:ring-2 focus:ring-sky-200"
+                  placeholder="np. Podróże"
+                />
+                <input
+                  type="color"
+                  value={newCollectionColor}
+                  onChange={(event) => setNewCollectionColor(event.target.value)}
+                  className="h-10 w-10 cursor-pointer rounded border border-neutral-200 bg-white p-1"
+                />
+              </div>
+              <button
+                type="submit"
+                disabled={collectionFormBusy}
+                className="mt-3 w-full rounded-full bg-sky-500 px-4 py-2 text-sm font-medium text-white shadow transition hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {collectionFormBusy ? 'Tworzę…' : 'Dodaj zbiór'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
+    </>
   );
 }
