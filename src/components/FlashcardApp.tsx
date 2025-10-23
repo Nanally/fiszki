@@ -61,7 +61,7 @@ export function FlashcardApp() {
     const load = async () => {
       setLoadingCards(true);
       setError(null);
-      let query = supabase.from('flashcards').select().order('created_at', { ascending: true });
+      let query = supabase!.from('flashcards').select().order('created_at', { ascending: true });
 
       if (filter === 'new') {
         query = query.eq('is_mastered', false);
@@ -94,7 +94,7 @@ export function FlashcardApp() {
     let cancelled = false;
     const performLookup = async () => {
       setSearchingReference(true);
-      const { data, error: lookupError } = await supabase
+      const { data, error: lookupError } = await supabase!
         .from('hsk_reference')
         .select()
         .ilike('meaning_pl', `%${lookupQuery.trim()}%`)
@@ -138,7 +138,7 @@ export function FlashcardApp() {
       current.map((item) => (item.id === card.id ? { ...item, is_mastered: nextValue } : item))
     );
 
-    const { error: updateError } = await supabase
+    const { error: updateError } = await supabase!
       .from('flashcards')
       .update({ is_mastered: nextValue })
       .eq('id', card.id);
@@ -288,7 +288,7 @@ export function FlashcardApp() {
 
     setFormMessage(null);
 
-    const { error: deleteError } = await supabase.from('flashcards').delete().eq('id', card.id);
+    const { error: deleteError } = await supabase!.from('flashcards').delete().eq('id', card.id);
 
     if (deleteError) {
       setFormMessage(`Nie udało się usunąć fiszki: ${deleteError.message}`);
@@ -378,7 +378,7 @@ export function FlashcardApp() {
           hsk_reference_id: selectedReference?.id ?? null,
         };
 
-    const { data, error: insertError } = await supabase
+    const { data, error: insertError } = await supabase!
       .from('flashcards')
       .insert(payload)
       .select()
