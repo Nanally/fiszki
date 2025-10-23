@@ -4,6 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabaseClient';
 import {
   cacheCardOffline,
+  getAllOfflineCards,
   getOfflineStatusSnapshot,
   getPlayableAudioUrl,
   removeCardFromOffline,
@@ -23,6 +24,12 @@ const emptyStateCopy = {
   all: 'Brak fiszek. Dodaj pierwsze słówko, aby zacząć naukę.',
   new: 'Wszystkie słówka oznaczone jako opanowane – czas dodać nowe.',
   mastered: 'Jeszcze żadnego słówka nie oznaczono jako opanowane.',
+};
+
+const offlineEmptyStateCopy = {
+  all: 'Brak zapisanych offline fiszek. Zapisz wybrane słówka, gdy jesteś online.',
+  new: 'Brak zapisanych offline fiszek do nauki.',
+  mastered: 'Brak zapisanych offline fiszek oznaczonych jako opanowane.',
 };
 
 export function FlashcardApp() {
@@ -48,8 +55,10 @@ export function FlashcardApp() {
   const [searchingReference, setSearchingReference] = useState(false);
   const [formBusy, setFormBusy] = useState(false);
   const [formMessage, setFormMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [offlineStatusMap, setOfflineStatusMap] = useState<Record<string, { audioStored: boolean }>>({});
   const [offlineBusyMap, setOfflineBusyMap] = useState<Record<string, boolean>>({});
+  const [offlineFallbackActive, setOfflineFallbackActive] = useState(false);
 
   const masteredCount = useMemo(() => cards.filter((card) => card.is_mastered).length, [cards]);
   const swipeStartX = useRef<number | null>(null);
@@ -61,16 +70,65 @@ export function FlashcardApp() {
   };
 
   useEffect(() => {
-    if (!supabase) {
-      setError('Brak konfiguracji Supabase. Uzupełnij zmienne środowiskowe i uruchom ponownie.');
-      setLoadingCards(false);
-      return;
-    }
+    let cancelled = false;
+
+    const applyFilter = (items: Flashcard[]) => {
+      let next = items;
+      if (filter === 'new') {
+        next = items.filter((item) => !item.is_mastered);
+      } else if (filter === 'mastered') {
+        next = items.filter((item) => item.is_mastered);
+      }
+      return [...next].sort(
+        (a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime()
+      );
+    };
+
+    const useOfflineFallback = async (message: string, emptyMessage: string) => {
+      try {
+        const offlineCards = applyFilter(await getAllOfflineCards());
+        if (cancelled) return;
+
+        if (offlineCards.length) {
+          setCards(offlineCards);
+          setActiveIndex(0);
+          setShowTranslation(false);
+          setStatusMessage(message);
+          setOfflineFallbackActive(true);
+          setError(null);
+        } else {
+          setCards([]);
+          setOfflineFallbackActive(true);
+          setStatusMessage(emptyMessage);
+          setError(null);
+        }
+      } catch (fallbackError) {
+        console.error('Nie udało się wczytać danych offline', fallbackError);
+        if (!cancelled) {
+          setError('Nie udało się pobrać fiszek ani wczytać danych offline.');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoadingCards(false);
+        }
+      }
+    };
 
     const load = async () => {
       setLoadingCards(true);
       setError(null);
-      let query = supabase!.from('flashcards').select().order('created_at', { ascending: true });
+      setStatusMessage(null);
+      setOfflineFallbackActive(false);
+
+      if (!supabase) {
+        await useOfflineFallback(
+          'Tryb offline: wyświetlam zapisane fiszki.',
+          'Brak zapisanych offline fiszek. Zapisz je, gdy masz połączenie.'
+        );
+        return;
+      }
+
+      let query = supabase.from('flashcards').select().order('created_at', { ascending: true });
 
       if (filter === 'new') {
         query = query.eq('is_mastered', false);
@@ -78,19 +136,38 @@ export function FlashcardApp() {
         query = query.eq('is_mastered', true);
       }
 
-      const { data, error: loadError } = await query;
-      if (loadError) {
-        setError(loadError.message);
-      } else {
-        setCards(data ?? []);
+      try {
+        const { data, error: loadError } = await query;
+        if (cancelled) return;
+
+        if (loadError) {
+          console.warn('Nie udało się pobrać fiszek z Supabase', loadError);
+          await useOfflineFallback(
+            'Tryb offline: wyświetlam zapisane fiszki.',
+            'Brak zapisanych offline fiszek. Zapisz je, gdy masz połączenie.'
+          );
+          return;
+        }
+
+        const remoteCards = applyFilter(data ?? []);
+        setCards(remoteCards);
         setActiveIndex(0);
         setShowTranslation(false);
+        setLoadingCards(false);
+      } catch (requestError) {
+        console.error('Błąd podczas pobierania fiszek', requestError);
+        await useOfflineFallback(
+          'Tryb offline: wyświetlam zapisane fiszki.',
+          'Brak zapisanych offline fiszek. Zapisz je, gdy masz połączenie.'
+        );
       }
-
-      setLoadingCards(false);
     };
 
     void load();
+
+    return () => {
+      cancelled = true;
+    };
   }, [filter]);
 
   useEffect(() => {
@@ -512,9 +589,10 @@ export function FlashcardApp() {
     }
 
     if (!cards.length) {
+      const message = offlineFallbackActive ? offlineEmptyStateCopy[filter] : emptyStateCopy[filter];
       return (
         <div className="rounded-xl border border-dashed border-neutral-300 bg-white p-10 text-center text-neutral-500">
-          {emptyStateCopy[filter]}
+          {message}
         </div>
       );
     }
@@ -527,6 +605,11 @@ export function FlashcardApp() {
 
     return (
       <div className="flex flex-col items-center gap-6">
+        {statusMessage && (
+          <div className="w-full max-w-sm rounded-xl border border-sky-200/70 bg-sky-50/80 px-4 py-3 text-sm text-sky-800 shadow-sm">
+            {statusMessage}
+          </div>
+        )}
         <div className="relative w-full max-w-sm" style={{ perspective: '1600px' }}>
           <button
             type="button"
