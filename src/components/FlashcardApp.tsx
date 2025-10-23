@@ -1151,8 +1151,8 @@ export function FlashcardApp() {
   return (
     <>
       <div className="mx-auto flex w-full max-w-5xl flex-col gap-10 rounded-3xl border border-white/40 bg-white/60 p-6 pb-16 shadow-2xl shadow-indigo-100/40 backdrop-blur-xl sm:p-10">
-      <header className="flex flex-col gap-6 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex flex-wrap items-center gap-2">
+      <header className="flex flex-col gap-4">
+        <div className="flex items-center gap-2">
           {(Object.keys(FILTER_LABELS) as Filter[]).map((option) => (
             <button
               key={option}
@@ -1167,30 +1167,32 @@ export function FlashcardApp() {
               {FILTER_LABELS[option]}
             </button>
           ))}
+          <div className="flex flex-1 items-center justify-end">
+            <button
+              type="button"
+              onClick={() => {
+                setCollectionsPanelOpen(true);
+                setCollectionFormError(null);
+              }}
+              className="flex h-10 w-10 items-center justify-center rounded-full border border-white/70 bg-white/40 text-lg text-neutral-600 shadow-sm transition hover:bg-white/70 hover:text-sky-700"
+              aria-label="Zarządzaj zbiorami"
+              title="Zarządzaj zbiorami"
+            >
+              ☰
+            </button>
+          </div>
         </div>
-        <div className="flex items-center gap-3">
-          <button
-            type="button"
-            onClick={() => {
-              setCollectionsPanelOpen(true);
-              setCollectionFormError(null);
-            }}
-            className="flex h-10 w-10 items-center justify-center rounded-full border border-white/70 bg-white/40 text-lg text-neutral-600 shadow-sm transition hover:bg-white/70 hover:text-sky-700"
-            aria-label="Zarządzaj zbiorami"
-            title="Zarządzaj zbiorami"
-          >
-            ☰
-          </button>
-          <div className="rounded-2xl border border-white/50 bg-white/70 px-5 py-4 text-sm text-neutral-600 shadow-lg shadow-sky-100/40 backdrop-blur">
-            <p className="text-xs uppercase tracking-wide text-sky-600">Postęp</p>
-            <p>
-              {masteredCount}/{cards.length}
-            </p>
-            {activeCollection && (
-              <p className="mt-1 text-xs text-neutral-500">
-                Zbiór: <span className="font-medium text-neutral-700">{activeCollection.name}</span>
-              </p>
-            )}
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="rounded-2xl border border-white/50 bg-white/70 px-5 py-4 shadow-lg shadow-sky-100/40 backdrop-blur">
+            <div className="flex items-baseline gap-3 text-sky-600">
+              <span className="text-xs uppercase tracking-wide">Postęp</span>
+              <span className="text-sm font-semibold text-neutral-700">
+                {masteredCount}/{cards.length}
+              </span>
+            </div>
+          </div>
+          <div className="rounded-2xl border border-white/50 bg-white/70 px-5 py-4 text-sm font-medium text-fuchsia-600 shadow-lg shadow-sky-100/40 backdrop-blur">
+            {activeCollection ? activeCollection.name : 'Brak – wszystkie fiszki'}
           </div>
         </div>
       </header>
