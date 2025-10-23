@@ -1192,7 +1192,7 @@ export function FlashcardApp() {
             </div>
           </div>
           <div className="rounded-2xl border border-white/50 bg-white/70 px-5 py-4 text-sm font-medium text-fuchsia-600 shadow-lg shadow-sky-100/40 backdrop-blur">
-            {activeCollection ? activeCollection.name : 'Brak – wszystkie fiszki'}
+            {activeCollection?.name ?? 'Wszystkie fiszki'}
           </div>
         </div>
       </header>
