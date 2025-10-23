@@ -1185,7 +1185,7 @@ export function FlashcardApp() {
         <div className="flex flex-wrap items-center justify-between gap-2">
           <div className="rounded-2xl border border-white/50 bg-white/70 px-5 py-4 shadow-lg shadow-sky-100/40 backdrop-blur">
             <div className="flex items-baseline gap-3 text-sky-600">
-              <span className="text-xs uppercase tracking-wide">Postęp</span>
+              <span className="text-xs uppercase tracking-wide">Postęp:</span>
               <span className="text-sm font-semibold text-neutral-700">
                 {masteredCount}/{cards.length}
               </span>
