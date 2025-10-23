@@ -19,9 +19,9 @@ import type { Collection, Flashcard, HskReference } from '@/lib/types';
 type Filter = 'all' | 'new' | 'mastered';
 
 const FILTER_LABELS: Record<Filter, string> = {
-  all: 'Wszystkie',
-  new: 'Do nauki',
-  mastered: 'Opanowane',
+  all: 'ALL',
+  new: 'LEARN',
+  mastered: 'GOT IT',
 };
 
 const emptyStateCopy = {
@@ -1158,7 +1158,7 @@ export function FlashcardApp() {
               key={option}
               type="button"
               onClick={() => setFilter(option)}
-              className={`rounded-full border px-4 py-2 text-sm transition backdrop-blur ${
+              className={`rounded-full border px-4 py-2 text-xs tracking-wide transition backdrop-blur ${
                 filter === option
                   ? 'border-sky-400/60 bg-sky-500/90 text-white shadow shadow-sky-200/60'
                   : 'border-white/70 bg-white/40 text-neutral-600 hover:bg-white/70 hover:text-sky-700'
@@ -1167,12 +1167,6 @@ export function FlashcardApp() {
               {FILTER_LABELS[option]}
             </button>
           ))}
-          <a
-            href="#add-card"
-            className="rounded-full border border-white/70 bg-white/40 px-4 py-2 text-sm text-neutral-700 transition hover:bg-white/70 hover:text-sky-700"
-          >
-            Dodaj
-          </a>
         </div>
         <div className="flex items-center gap-3">
           <button
@@ -1583,6 +1577,25 @@ export function FlashcardApp() {
                 <p className="text-xs text-neutral-500">Brak zdefiniowanych zbiorów.</p>
               )}
             </div>
+
+            <button
+              type="button"
+              onClick={() => {
+                setCollectionsPanelOpen(false);
+                setEditingCollectionId(null);
+                setEditingCollectionName('');
+                setCollectionFormError(null);
+                if (typeof document !== 'undefined') {
+                  const target = document.getElementById('add-card');
+                  if (target) {
+                    target.scrollIntoView({ behavior: 'smooth' });
+                  }
+                }
+              }}
+              className="rounded-full border border-sky-200 bg-sky-50 px-4 py-2 text-sm font-medium text-sky-600 transition hover:bg-sky-100"
+            >
+              Dodaj nową fiszkę
+            </button>
 
             <form
               onSubmit={(event) => void handleCreateCollection(event)}
