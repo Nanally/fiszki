@@ -1167,7 +1167,13 @@ export function FlashcardApp() {
               {FILTER_LABELS[option]}
             </button>
           ))}
-          <div className="flex flex-1 items-center justify-end">
+          <div className="flex flex-1 items-center justify-end gap-2">
+            <a
+              href="#hsk1-categories"
+              className="hidden items-center gap-2 rounded-full border border-white/70 bg-white/40 px-4 py-2 text-xs font-medium text-sky-700 shadow-sm transition hover:bg-white/70 hover:text-sky-900 sm:inline-flex"
+            >
+              📚 Lista HSK1
+            </a>
             <button
               type="button"
               onClick={() => {
@@ -1195,6 +1201,12 @@ export function FlashcardApp() {
             {activeCollection ? activeCollection.name : 'Brak – wszystkie fiszki'}
           </div>
         </div>
+        <a
+          href="#hsk1-categories"
+          className="inline-flex items-center gap-2 text-xs font-medium text-sky-700 underline-offset-4 hover:underline sm:hidden"
+        >
+          📚 Zobacz listę HSK1
+        </a>
       </header>
 
       <section>

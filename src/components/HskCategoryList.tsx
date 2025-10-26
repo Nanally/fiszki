@@ -2,12 +2,16 @@ import { HSK1_CATEGORIES } from '@/data/hskCategories';
 
 export function HskCategoryList() {
   return (
-    <section className="mx-auto mt-12 w-full max-w-5xl rounded-3xl border border-white/40 bg-white/70 p-6 shadow-xl shadow-indigo-100/40 backdrop-blur-xl sm:p-10">
+    <section
+      id="hsk1-categories"
+      className="mx-auto mt-12 w-full max-w-5xl rounded-3xl border border-white/40 bg-white/70 p-6 shadow-xl shadow-indigo-100/40 backdrop-blur-xl sm:p-10"
+      aria-labelledby="hsk1-categories-title"
+    >
       <header className="mb-8 text-center">
         <p className="text-sm font-semibold uppercase tracking-widest text-sky-600">
           Kategorie HSK1
         </p>
-        <h2 className="mt-2 text-2xl font-bold text-neutral-800 sm:text-3xl">
+        <h2 id="hsk1-categories-title" className="mt-2 text-2xl font-bold text-neutral-800 sm:text-3xl">
           Gotowe zestawy słówek z wymową i tłumaczeniami
         </h2>
         <p className="mt-3 text-sm text-neutral-600 sm:text-base">
