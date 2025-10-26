@@ -21,7 +21,7 @@ type Filter = 'all' | 'new' | 'mastered';
 const FILTER_LABELS: Record<Filter, string> = {
   all: 'ALL',
   new: 'LEARN',
-  mastered: 'GOT IT',
+  mastered: 'GOT IT!',
 };
 
 const emptyStateCopy = {
